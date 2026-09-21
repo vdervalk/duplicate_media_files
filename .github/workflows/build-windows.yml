@@ -1,0 +1,91 @@
+name: Windows-build
+
+# Bouwt DuplicateMediaFinder.exe op een Windows-machine van GitHub.
+#
+# Handmatig starten: tabblad Actions -> Windows-build -> Run workflow.
+# Vul een versienummer in (bijv. v1.0.0) om er meteen een Release van te maken,
+# of laat het leeg om alleen een tijdelijke download (artifact) te krijgen.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Versienummer voor de Release, bijvoorbeeld v1.0.0 (leeg = alleen artifact)"
+        required: false
+        default: "v1.0.0"
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Code ophalen
+        uses: actions/checkout@v4
+
+      - name: Python installeren
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Afhankelijkheden installeren
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Tests draaien
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: pytest
+
+      - name: Executable bouwen
+        run: pyinstaller --noconfirm --clean DuplicateMediaFinder.spec
+
+      - name: Controleren of de exe er is
+        shell: bash
+        run: |
+          ls -lh dist/DuplicateMediaFinder.exe
+          echo "SHA256:"
+          sha256sum dist/DuplicateMediaFinder.exe
+
+      - name: Exe klaarzetten als download
+        uses: actions/upload-artifact@v4
+        with:
+          name: DuplicateMediaFinder-windows
+          path: dist/DuplicateMediaFinder.exe
+          retention-days: 90
+
+      - name: Release maken
+        # Bij een versietag, of wanneer er handmatig een versienummer is ingevuld.
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.version != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            TAG="${GITHUB_REF_NAME}"
+          else
+            TAG="${{ inputs.version }}"
+          fi
+          echo "Release: $TAG"
+          NOTES=$(printf '%s\n' \
+            "Losse Windows-executable, geen installatie nodig." \
+            "" \
+            "1. Download DuplicateMediaFinder.exe hieronder." \
+            "2. Dubbelklik erop. Windows toont mogelijk \"Windows heeft uw pc beveiligd\"" \
+            "   omdat het bestand geen handtekening heeft: klik op Meer informatie en" \
+            "   daarna op Toch uitvoeren." \
+            "" \
+            "Gebouwd uit commit ${GITHUB_SHA}.")
+          gh release create "$TAG" dist/DuplicateMediaFinder.exe \
+            --title "Duplicate Media Finder $TAG" \
+            --notes "$NOTES" \
+          || gh release upload "$TAG" dist/DuplicateMediaFinder.exe --clobber

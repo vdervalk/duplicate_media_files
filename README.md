@@ -31,7 +31,20 @@ Bestandsnaam, map en datum spelen geen enkele rol.
 
 ## Snel starten
 
-### Optie A: losse .exe bouwen (aanbevolen voor dagelijks gebruik)
+### Optie A: kant-en-klare .exe downloaden (geen Python nodig)
+
+Ga naar **[Releases](https://github.com/vdervalk/duplicate_media_files/releases)** en download
+`DuplicateMediaFinder.exe`. Dubbelklikken en klaar.
+
+Staat er nog geen release, start er dan zelf een build: tabblad **Actions** →
+**Windows-build** → *Run workflow*. GitHub bouwt het bestand in een paar minuten op een
+Windows-machine en zet het onder Releases.
+
+> Windows toont mogelijk *"Windows heeft uw pc beveiligd"*, omdat de exe geen
+> handtekening van een betaalde certificaatuitgever heeft. Klik op *Meer informatie* en
+> daarna op *Toch uitvoeren*.
+
+### Optie B: zelf een .exe bouwen
 
 Eenmalig, met [Python 3.10 of nieuwer](https://www.python.org/downloads/windows/) geïnstalleerd:
 
@@ -48,7 +61,7 @@ neerzetten en dubbelklikken. Python is daarna niet meer nodig.
 > PowerShell dan eenmalig met:
 > `powershell -ExecutionPolicy Bypass -File .\build_exe.ps1`
 
-### Optie B: rechtstreeks met Python draaien
+### Optie C: rechtstreeks met Python draaien
 
 ```powershell
 python -m venv .venv
