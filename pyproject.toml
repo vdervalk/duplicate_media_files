@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "duplicate-media-finder"
+version = "1.0.0"
+description = "Vind en verwijder byte-identieke foto- en videobestanden op Windows"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "PySide6-Essentials>=6.6",
+    "Send2Trash>=1.8",
+    "Pillow>=10.0",
+]
+
+[project.optional-dependencies]
+previews = ["pillow-heif>=0.15", "imageio-ffmpeg>=0.4.9"]
+dev = ["pytest>=8.0", "pyinstaller>=6.6"]
+
+[project.gui-scripts]
+duplicate-media-finder = "dupefinder.app:main"
+
+[tool.setuptools.packages.find]
+include = ["dupefinder*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

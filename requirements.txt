@@ -1,0 +1,8 @@
+# Basis (verplicht)
+PySide6-Essentials>=6.6      # gebruikersinterface (Qt)
+Send2Trash>=1.8              # verwijderen naar de Windows-prullenbak
+Pillow>=10.0                 # miniaturen van foto's
+
+# Optioneel, maar aangeraden
+pillow-heif>=0.15            # voorbeeldweergave van HEIC/HEIF (iPhone-foto's)
+imageio-ffmpeg>=0.4.9        # voorbeeldweergave van video's (levert ffmpeg mee)
