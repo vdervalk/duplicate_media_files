@@ -40,6 +40,10 @@ Staat er nog geen release, start er dan zelf een build: tabblad **Actions** →
 **Windows-build** → *Run workflow*. GitHub bouwt het bestand in een paar minuten op een
 Windows-machine en zet het onder Releases.
 
+> **Let op:** *Run workflow* (rechtsboven) bouwt de huidige code. De knop *Re-run jobs* bij een
+> oude build doet iets anders: die draait die oude build nog eens over, met de oude code en het
+> oude versienummer. Voor een nieuwe versie is *Run workflow* dus de juiste knop.
+
 > Windows toont mogelijk *"Windows heeft uw pc beveiligd"*, omdat de exe geen
 > handtekening van een betaalde certificaatuitgever heeft. Klik op *Meer informatie* en
 > daarna op *Toch uitvoeren*.
@@ -71,6 +75,20 @@ python run.py
 ```
 
 Of dubbelklik daarna op `start.bat`.
+
+### Een nieuwe versie uitbrengen
+
+1. Verhoog `__version__` in `dupefinder/__init__.py` (en `version` in `pyproject.toml`).
+2. Actions → **Windows-build** → *Run workflow*.
+
+| Veld | Betekenis |
+|------|-----------|
+| Versienummer | Leeg laten pakt het nummer uit de code, bijvoorbeeld `v1.1.0`. Zelf invullen mag ook. |
+| Een Release aanmaken | Uit zetten levert alleen een tijdelijke download onder de build zelf. |
+| Een bestaande Release overschrijven | Alleen nodig als je dezelfde versie opnieuw wilt bouwen. |
+
+Bestaat de release al en staat die laatste optie uit, dan stopt de build met een duidelijke
+melding in plaats van je bestaande download stilletjes te vervangen.
 
 ---
 
