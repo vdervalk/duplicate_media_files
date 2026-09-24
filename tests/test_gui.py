@@ -128,3 +128,70 @@ def test_empty_result_clears_tree(window, media_tree):
     window._clear_results()
     assert window.tree.topLevelItemCount() == 0
     assert window.result is None
+
+
+def test_refresh_removes_handled_groups(window, media_tree):
+    import os
+
+    result = populate(window, media_tree)
+    groups_before = len(result.groups)
+    group = next(g for g in result.groups if g.count == 2)
+    os.remove(group.files[1].path)
+
+    window._refresh_list()
+
+    assert window.tree.topLevelItemCount() == groups_before - 1
+    assert len(window.result.groups) == groups_before - 1
+    assert group.digest not in {g.digest for g in window.result.groups}
+
+
+def test_refresh_keeps_checkboxes_on_surviving_rows(window, media_tree):
+    import os
+
+    result = populate(window, media_tree)
+    window._select_all_duplicates()
+    checked_before = set(window._checked_paths())
+
+    doomed = next(g for g in result.groups if g.count == 2)
+    os.remove(doomed.files[1].path)
+
+    window._refresh_list()
+
+    checked_after = set(window._checked_paths())
+    assert checked_after == {p for p in checked_before if os.path.exists(p)}
+    assert checked_after
+
+
+def test_refresh_keeps_expanded_groups_expanded(window, media_tree):
+    populate(window, media_tree)
+    window.tree.topLevelItem(0).setExpanded(True)
+    window.tree.topLevelItem(1).setExpanded(False)
+    first_digest = window.tree.topLevelItem(0).data(0, Qt.ItemDataRole.UserRole + 3)
+
+    window._refresh_list()
+
+    for i in range(window.tree.topLevelItemCount()):
+        item = window.tree.topLevelItem(i)
+        if item.data(0, Qt.ItemDataRole.UserRole + 3) == first_digest:
+            assert item.isExpanded()
+        else:
+            assert not item.isExpanded()
+
+
+def test_refresh_without_result_does_not_crash(window):
+    window._refresh_list()
+    assert window.tree.topLevelItemCount() == 0
+
+
+def test_refresh_after_everything_is_cleaned_up(window, media_tree):
+    import os
+
+    result = populate(window, media_tree)
+    for group in result.groups:
+        for entry in group.files[1:]:
+            os.remove(entry.path)
+
+    window._refresh_list()
+
+    assert window.tree.topLevelItemCount() == 0
+    assert window.result.groups == []
