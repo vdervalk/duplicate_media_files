@@ -10,9 +10,19 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Versienummer voor de Release, bijvoorbeeld v1.0.0 (leeg = alleen artifact)"
+        description: "Versienummer, bijvoorbeeld v1.2.0. Leeg laten = het versienummer uit de code"
         required: false
-        default: "v1.0.0"
+        default: ""
+      release:
+        description: "Een Release aanmaken met de exe erbij"
+        type: boolean
+        required: false
+        default: true
+      overwrite:
+        description: "Een bestaande Release met dit versienummer overschrijven"
+        type: boolean
+        required: false
+        default: false
   push:
     tags:
       - "v*"
@@ -63,29 +73,57 @@ jobs:
           path: dist/DuplicateMediaFinder.exe
           retention-days: 90
 
+      - name: Releasetekst opstellen
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.release
+        shell: bash
+        run: |
+          cat > notes.md <<'MARKDOWN'
+          Losse Windows-executable, geen installatie nodig.
+
+          1. Download `DuplicateMediaFinder.exe` hieronder.
+          2. Dubbelklik erop. Windows toont mogelijk "Windows heeft uw pc beveiligd" omdat het
+             bestand geen handtekening heeft: klik op **Meer informatie** en dan **Toch uitvoeren**.
+
+          MARKDOWN
+          {
+            echo "Gebouwd uit commit ${GITHUB_SHA} op $(date -u '+%d-%m-%Y %H:%M UTC')."
+            echo ""
+            echo "SHA-256 van de exe:"
+            echo ""
+            echo '```'
+            sha256sum dist/DuplicateMediaFinder.exe | cut -d" " -f1
+            echo '```'
+          } >> notes.md
+
       - name: Release maken
-        # Bij een versietag, of wanneer er handmatig een versienummer is ingevuld.
-        if: startsWith(github.ref, 'refs/tags/v') || inputs.version != ''
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Het versienummer komt van de tag, van de invoer, of uit de code.
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
             TAG="${GITHUB_REF_NAME}"
-          else
+          elif [ -n "${{ inputs.version }}" ]; then
             TAG="${{ inputs.version }}"
+          else
+            TAG="v$(python -c 'import dupefinder; print(dupefinder.__version__)')"
           fi
           echo "Release: $TAG"
-          NOTES=$(printf '%s\n' \
-            "Losse Windows-executable, geen installatie nodig." \
-            "" \
-            "1. Download DuplicateMediaFinder.exe hieronder." \
-            "2. Dubbelklik erop. Windows toont mogelijk \"Windows heeft uw pc beveiligd\"" \
-            "   omdat het bestand geen handtekening heeft: klik op Meer informatie en" \
-            "   daarna op Toch uitvoeren." \
-            "" \
-            "Gebouwd uit commit ${GITHUB_SHA}.")
+
+          # Een bestaande Release overschrijven we alleen als daar bewust om gevraagd is.
+          # Zo kan een re-run van een oude build nooit stilletjes een nieuwere exe vervangen.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            if [ "${{ inputs.overwrite }}" != "true" ]; then
+              echo "::error::Release $TAG bestaat al. Verhoog __version__ in dupefinder/__init__.py, vul een ander versienummer in, of zet de optie 'Een bestaande Release overschrijven' aan."
+              exit 1
+            fi
+            echo "Bestaande release $TAG wordt bijgewerkt."
+            gh release upload "$TAG" dist/DuplicateMediaFinder.exe --clobber
+            gh release edit "$TAG" --title "Duplicate Media Finder $TAG" --notes "$(cat notes.md)"
+            exit 0
+          fi
+
           gh release create "$TAG" dist/DuplicateMediaFinder.exe \
             --title "Duplicate Media Finder $TAG" \
-            --notes "$NOTES" \
-          || gh release upload "$TAG" dist/DuplicateMediaFinder.exe --clobber
+            --notes "$(cat notes.md)"

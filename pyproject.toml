@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "duplicate-media-finder"
-version = "1.0.0"
+version = "1.1.0"
 description = "Vind en verwijder byte-identieke foto- en videobestanden op Windows"
 readme = "README.md"
 requires-python = ">=3.10"
