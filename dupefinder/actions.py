@@ -72,6 +72,58 @@ def plan_deletion(
 
 
 # ---------------------------------------------------------------------------
+# Lijst opschonen
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class RefreshReport:
+    """Uitkomst van het opnieuw controleren van een scanresultaat."""
+
+    groups: list[DuplicateGroup] = field(default_factory=list)
+    #: Bestanden die niet meer op schijf staan (verwijderd of verplaatst).
+    missing: list[str] = field(default_factory=list)
+    #: Bestanden waarvan grootte of datum is veranderd; niet langer gegarandeerd identiek.
+    changed: list[str] = field(default_factory=list)
+    #: Aantal groepen dat hierdoor uit beeld verdwijnt.
+    resolved_groups: int = 0
+
+    @property
+    def has_changes(self) -> bool:
+        return bool(self.missing or self.changed or self.resolved_groups)
+
+
+def refresh_groups(groups: Sequence[DuplicateGroup]) -> RefreshReport:
+    """Controleer de groepen opnieuw tegen de schijf, zonder te hashen.
+
+    Een bestand valt af wanneer het weg is, of wanneer grootte of wijzigingsdatum
+    niet meer overeenkomen met de scan: dan is niet langer gegarandeerd dat het
+    identiek is aan de rest van de groep. Blijft er nog maar een bestand over,
+    dan is de groep afgehandeld en verdwijnt hij.
+    """
+    report = RefreshReport()
+    for group in groups:
+        kept: list = []
+        for entry in group.files:
+            try:
+                stat = os.stat(entry.path)
+            except OSError:
+                report.missing.append(entry.path)
+                continue
+            if stat.st_size != entry.size or stat.st_mtime_ns != entry.mtime_ns:
+                report.changed.append(entry.path)
+                continue
+            kept.append(entry)
+        if len(kept) > 1:
+            report.groups.append(
+                DuplicateGroup(digest=group.digest, size=group.size, files=kept)
+            )
+        else:
+            report.resolved_groups += 1
+    return report
+
+
+# ---------------------------------------------------------------------------
 # Verwijderen naar de prullenbak
 # ---------------------------------------------------------------------------
 

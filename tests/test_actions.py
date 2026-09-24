@@ -65,3 +65,71 @@ def test_delete_paths_reports_failures(tmp_path):
 
 def test_empty_plan():
     assert DeletionPlan().is_empty
+
+
+def test_refresh_drops_group_when_duplicate_is_gone(media_tree):
+    from dupefinder.actions import refresh_groups
+
+    result = scan_tree(media_tree)
+    group = next(g for g in result.groups if g.count == 2)
+    os.remove(group.files[1].path)
+
+    report = refresh_groups(result.groups)
+
+    assert report.resolved_groups == 1
+    assert report.missing == [group.files[1].path]
+    assert group.digest not in {g.digest for g in report.groups}
+    assert len(report.groups) == len(result.groups) - 1
+
+
+def test_refresh_keeps_group_with_two_copies_left(media_tree):
+    from dupefinder.actions import refresh_groups
+
+    result = scan_tree(media_tree)
+    group = next(g for g in result.groups if g.count == 3)
+    os.remove(group.files[2].path)
+
+    report = refresh_groups(result.groups)
+
+    kept = next(g for g in report.groups if g.digest == group.digest)
+    assert kept.count == 2
+    assert kept.wasted_bytes == group.size
+
+
+def test_refresh_drops_changed_files(media_tree):
+    from dupefinder.actions import refresh_groups
+
+    result = scan_tree(media_tree)
+    group = next(g for g in result.groups if g.count == 2)
+    victim = group.files[1].path
+    with open(victim, "ab") as handle:
+        handle.write(b"extra bytes")
+
+    report = refresh_groups(result.groups)
+
+    assert report.changed == [victim]
+    assert report.resolved_groups == 1
+
+
+def test_refresh_without_changes_is_a_no_op(media_tree):
+    from dupefinder.actions import refresh_groups
+
+    result = scan_tree(media_tree)
+    report = refresh_groups(result.groups)
+
+    assert not report.has_changes
+    assert len(report.groups) == len(result.groups)
+    assert [g.count for g in report.groups] == [g.count for g in result.groups]
+
+
+def test_refresh_does_not_mutate_the_original_groups(media_tree):
+    from dupefinder.actions import refresh_groups
+
+    result = scan_tree(media_tree)
+    group = next(g for g in result.groups if g.count == 3)
+    before = list(group.files)
+    os.remove(group.files[2].path)
+
+    refresh_groups(result.groups)
+
+    assert group.files == before

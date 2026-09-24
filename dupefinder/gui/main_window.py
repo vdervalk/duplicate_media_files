@@ -32,7 +32,13 @@ from PySide6.QtWidgets import (
 )
 
 from .. import __app_name__, __version__
-from ..actions import ActionError, open_path, plan_deletion, reveal_in_file_manager
+from ..actions import (
+    ActionError,
+    open_path,
+    plan_deletion,
+    refresh_groups,
+    reveal_in_file_manager,
+)
 from ..cache import HashCache
 from ..config import ScanConfig, cache_path
 from ..exporter import export_csv, export_json, load_json
@@ -158,10 +164,17 @@ class MainWindow(QMainWindow):
         self.filter_edit = QLineEdit()
         self.filter_edit.setPlaceholderText("Filter op bestandsnaam of map...")
         self.filter_edit.textChanged.connect(self._apply_filter)
+        self.refresh_button = QPushButton("Vernieuwen")
+        self.refresh_button.setToolTip(
+            "Controleer de lijst opnieuw tegen de schijf (F5).\n"
+            "Groepen waarvan de duplicaten al weg zijn, verdwijnen uit het overzicht."
+        )
+        self.refresh_button.clicked.connect(self._refresh_list)
         self.thumbs_check = QCheckBox("Miniaturen in lijst")
         self.thumbs_check.setChecked(True)
         self.thumbs_check.toggled.connect(self._on_thumbs_toggled)
         filter_row.addWidget(self.filter_edit, stretch=1)
+        filter_row.addWidget(self.refresh_button)
         filter_row.addWidget(self.thumbs_check)
         left_layout.addLayout(filter_row)
 
@@ -259,6 +272,8 @@ class MainWindow(QMainWindow):
         self._add_action(file_menu, "Afsluiten", self.close, "Ctrl+Q")
 
         edit_menu = menu_bar.addMenu("Be&werken")
+        self._add_action(edit_menu, "Lijst vernieuwen", self._refresh_list, "F5")
+        edit_menu.addSeparator()
         self._add_action(edit_menu, "Duplicaten aanvinken", self._select_all_duplicates, "Ctrl+D")
         self._add_action(edit_menu, "Vinkjes wissen", self._clear_checks, "Ctrl+Shift+D")
         self._add_action(edit_menu, "Paden kopieren", self._copy_selected_paths, "Ctrl+C")
@@ -428,6 +443,7 @@ class MainWindow(QMainWindow):
             group_item.setText(3, f"SHA-256: {group.digest[:16]}...")
             group_item.setToolTip(3, f"SHA-256: {group.digest}")
             group_item.setData(0, GROUP_ROLE, index - 1)
+            group_item.setData(0, DIGEST_ROLE, group.digest)
             group_item.setFlags(
                 Qt.ItemFlag.ItemIsEnabled
                 | Qt.ItemFlag.ItemIsSelectable
@@ -831,6 +847,88 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(0)
         self.progress_bar.setFormat("")
         self.phase_label.setText("Klaar")
+        self._update_selection_summary()
+
+    def _refresh_list(self) -> None:
+        """Controleer de lijst opnieuw tegen de schijf en ruim afgehandelde groepen op.
+
+        Dit scant niet opnieuw: het kijkt alleen of de bekende bestanden er nog
+        staan en nog onveranderd zijn. Aangevinkte bestanden blijven aangevinkt.
+        """
+        if self.result is None or not self.result.groups:
+            self.statusBar().showMessage("Er is nog geen scanresultaat om te vernieuwen.", 4000)
+            return
+
+        checked_before = {os.path.normcase(p) for p in self._checked_paths()}
+        expanded_before = self._expanded_digests()
+        report = refresh_groups(self.result.groups)
+        self.result.groups = report.groups
+
+        self._populate_tree(self.result)
+        self._restore_expansion(expanded_before)
+        self._restore_checks(checked_before)
+        self._apply_filter(self.filter_edit.text())
+
+        parts: list[str] = []
+        if report.resolved_groups:
+            parts.append(f"{report.resolved_groups} afgehandelde groep(en) opgeruimd")
+        if report.missing:
+            parts.append(f"{len(report.missing)} bestand(en) niet meer aanwezig")
+        if report.changed:
+            parts.append(f"{len(report.changed)} bestand(en) gewijzigd sinds de scan")
+
+        if not report.groups:
+            self.statusBar().showMessage(
+                "Lijst vernieuwd. Er zijn geen duplicaten meer over. "
+                + (" | ".join(parts) if parts else "")
+            )
+            self._set_preview(None)
+            return
+
+        remaining = (
+            f"Over: {len(report.groups)} groepen, "
+            f"{format_bytes(self.result.reclaimable_bytes)} te winnen"
+        )
+        if parts:
+            self.statusBar().showMessage("Lijst vernieuwd: " + " | ".join(parts) + f". {remaining}.")
+        else:
+            self.statusBar().showMessage(f"Lijst vernieuwd, niets veranderd. {remaining}.")
+
+    def _expanded_digests(self) -> set[str]:
+        return {
+            str(self.tree.topLevelItem(i).data(0, DIGEST_ROLE) or "")
+            for i in range(self.tree.topLevelItemCount())
+            if self.tree.topLevelItem(i).isExpanded()
+        }
+
+    def _restore_expansion(self, digests: set[str]) -> None:
+        for i in range(self.tree.topLevelItemCount()):
+            group_item = self.tree.topLevelItem(i)
+            digest = str(group_item.data(0, DIGEST_ROLE) or "")
+            group_item.setExpanded(digest in digests)
+
+    def _restore_checks(self, paths: set[str]) -> None:
+        """Zet vinkjes terug na het opnieuw opbouwen van de boom."""
+        if not paths:
+            return
+        self._updating_checks = True
+        for i in range(self.tree.topLevelItemCount()):
+            group_item = self.tree.topLevelItem(i)
+            checked = 0
+            for j in range(group_item.childCount()):
+                child = group_item.child(j)
+                path = os.path.normcase(str(child.data(0, PATH_ROLE) or ""))
+                if path in paths and not child.isDisabled():
+                    child.setCheckState(0, Qt.CheckState.Checked)
+                    checked += 1
+            if checked == 0:
+                state = Qt.CheckState.Unchecked
+            elif checked == group_item.childCount():
+                state = Qt.CheckState.Checked
+            else:
+                state = Qt.CheckState.PartiallyChecked
+            group_item.setCheckState(0, state)
+        self._updating_checks = False
         self._update_selection_summary()
 
     def _remove_paths_from_view(self, paths: list[str]) -> None:

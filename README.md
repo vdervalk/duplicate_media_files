@@ -89,14 +89,31 @@ Of dubbelklik daarna op `start.bat`.
 |-------|--------------|
 | *Duplicaten aanvinken (oudste blijft staan)* | Vinkt in elke groep alles aan behalve het oudste bestand. |
 | *Vinkjes wissen* | Zet alle vinkjes uit. |
+| *Vernieuwen* (F5) | Controleert de lijst opnieuw tegen de schijf en haalt afgehandelde groepen weg. Scant niet opnieuw. |
 | Dubbelklik op een bestand | Opent de map in Verkenner met het bestand geselecteerd. |
 | Rechtermuisknop | Map openen, bestand openen, pad kopiëren, *Alleen dit bestand behouden*. |
 | Filterveld | Toont alleen regels waarvan naam of map de ingetypte tekst bevat. |
+
+### De lijst opruimen tijdens het werk
+
+Heb je in een groep opgeruimd, dan hoeft die groep niet meer in beeld te staan. Klik op
+**Vernieuwen** (of druk op `F5`) en de app loopt de lijst opnieuw langs:
+
+- bestanden die **weg zijn** verdwijnen uit de lijst;
+- bestanden waarvan **grootte of datum is veranderd** sinds de scan vallen af, want dan is niet
+  langer gegarandeerd dat ze identiek zijn;
+- groepen waar **minder dan twee** bestanden van over zijn, verdwijnen helemaal;
+- je **vinkjes en uitgeklapte groepen blijven staan**, en de statusbalk meldt wat er is opgeruimd.
+
+Dit werkt ook als je bestanden buiten de app hebt weggegooid, bijvoorbeeld in Verkenner. Er wordt
+niets opnieuw gehasht, dus het is meteen klaar. Wil je wel opnieuw zoeken naar duplicaten, gebruik
+dan *Scan starten*.
 
 ### Sneltoetsen
 
 | Toets | Actie |
 |-------|-------|
+| `F5` | Lijst vernieuwen |
 | `Ctrl+O` | Map toevoegen |
 | `Ctrl+D` | Duplicaten aanvinken |
 | `Ctrl+Shift+D` | Vinkjes wissen |
