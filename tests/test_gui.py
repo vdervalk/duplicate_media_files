@@ -195,3 +195,132 @@ def test_refresh_after_everything_is_cleaned_up(window, media_tree):
 
     assert window.tree.topLevelItemCount() == 0
     assert window.result.groups == []
+
+
+# --------------------------------------------------------------------------
+# Tabblad met onscherpe foto's
+# --------------------------------------------------------------------------
+
+
+def populate_blur(window, photo_tree):
+    from dupefinder.blurscan import scan_sharpness
+
+    result = scan_sharpness(ScanConfig(roots=[str(photo_tree)], use_cache=False))
+    window.blur_tab.set_result(result)
+    return result
+
+
+def visible_names(tab):
+    return sorted(
+        tab.tree.topLevelItem(i).text(0)
+        for i in range(tab.tree.topLevelItemCount())
+        if not tab.tree.topLevelItem(i).isHidden()
+    )
+
+
+def test_blur_tab_lists_every_measured_photo(window, photo_tree):
+    result = populate_blur(window, photo_tree)
+    assert window.blur_tab.tree.topLevelItemCount() == len(result.entries)
+
+
+def test_blur_tab_shows_only_suspects_by_default(window, photo_tree):
+    populate_blur(window, photo_tree)
+    names = visible_names(window.blur_tab)
+
+    assert "vaag.jpg" in names
+    assert "heel_vaag.jpg" in names
+    assert "scherp.jpg" not in names
+    assert "lucht.jpg" not in names  # weinig detail staat standaard uit
+
+
+def test_low_detail_can_be_shown(window, photo_tree):
+    populate_blur(window, photo_tree)
+    window.blur_tab.low_detail_check.setChecked(True)
+    assert "lucht.jpg" in visible_names(window.blur_tab)
+
+
+def test_showing_everything(window, photo_tree):
+    result = populate_blur(window, photo_tree)
+    tab = window.blur_tab
+    tab.only_blurry_check.setChecked(False)
+    tab.low_detail_check.setChecked(True)
+    assert len(visible_names(tab)) == len(result.entries)
+
+
+def test_threshold_slider_widens_the_selection(window, photo_tree):
+    populate_blur(window, photo_tree)
+    tab = window.blur_tab
+
+    tab.threshold_slider.setValue(0)
+    strict = len(visible_names(tab))
+    tab.threshold_slider.setValue(100)
+    loose = len(visible_names(tab))
+
+    assert loose > strict
+    assert "scherp.jpg" not in visible_names(tab) or loose >= strict
+
+
+def test_checking_visible_photos_and_delete_signal(window, photo_tree):
+    populate_blur(window, photo_tree)
+    tab = window.blur_tab
+    # Het hoofdvenster opent een bevestigingsvenster; in de test vangen we het
+    # signaal zelf op, anders blijft die dialoog wachten.
+    tab.delete_requested.disconnect(window._delete_photo_paths)
+    received = []
+    tab.delete_requested.connect(received.append)
+
+    tab._check_visible()
+    checked = tab.checked_paths()
+    assert checked
+    assert all(path.endswith(".jpg") for path in checked)
+    assert tab.delete_button.isEnabled()
+
+    tab.delete_button.click()
+    assert received == [checked]
+
+    tab._clear_checks()
+    assert tab.checked_paths() == []
+    assert not tab.delete_button.isEnabled()
+
+
+def test_removing_paths_updates_the_blur_tab(window, photo_tree):
+    result = populate_blur(window, photo_tree)
+    victim = result.entries[0].path
+
+    window.blur_tab.remove_paths([victim])
+
+    assert victim not in [e.path for e in window.blur_tab.result.entries]
+    assert window.blur_tab.tree.topLevelItemCount() == len(result.entries)
+
+
+def test_blur_tab_refresh_drops_missing_files(window, photo_tree):
+    import os
+
+    result = populate_blur(window, photo_tree)
+    count_before = len(result.entries)
+    os.remove(photo_tree / "vaag.jpg")
+
+    window.blur_tab.refresh()
+
+    assert len(window.blur_tab.result.entries) == count_before - 1
+    assert "vaag.jpg" not in visible_names(window.blur_tab)
+
+
+def test_scan_button_label_follows_the_tab(window):
+    window.tabs.setCurrentIndex(1)
+    assert "Scherpte" in window.scan_button.text()
+    window.tabs.setCurrentIndex(0)
+    assert "Scan starten" in window.scan_button.text()
+
+
+def test_f5_refreshes_the_active_tab(window, media_tree, photo_tree):
+    import os
+
+    populate(window, media_tree)
+    populate_blur(window, photo_tree)
+    os.remove(photo_tree / "vaag.jpg")
+
+    window.tabs.setCurrentIndex(1)
+    window._refresh_active_tab()
+
+    assert "vaag.jpg" not in [e.name for e in window.blur_tab.result.entries]

@@ -7,6 +7,7 @@ import threading
 from PySide6.QtCore import QObject, QRunnable, QThread, QThreadPool, Signal, Slot
 
 from ..actions import DeletionOutcome, delete_paths
+from ..blurscan import SharpnessResult, SharpnessScanner
 from ..config import ScanConfig
 from ..scanner import DuplicateScanner, ScanProgress, ScanResult
 from ..thumbnails import thumbnail_png
@@ -44,6 +45,35 @@ class ScanWorker(QThread):
         self.progressed.emit(progress)
 
 
+class SharpnessWorker(QThread):
+    """Meet de scherpte van alle foto's zonder de interface te blokkeren."""
+
+    progressed = Signal(object)  # ScanProgress
+    completed = Signal(object)  # SharpnessResult
+    failed = Signal(str)
+
+    def __init__(self, config: ScanConfig, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self.config = config
+        self.cancel_event = threading.Event()
+
+    def cancel(self) -> None:
+        self.cancel_event.set()
+
+    def run(self) -> None:  # pragma: no cover - draait in een echte thread
+        try:
+            scanner = SharpnessScanner(
+                self.config,
+                on_progress=self.progressed.emit,
+                cancel_event=self.cancel_event,
+            )
+            result: SharpnessResult = scanner.run()
+        except Exception as exc:  # noqa: BLE001 - alles melden aan de GUI
+            self.failed.emit(str(exc))
+            return
+        self.completed.emit(result)
+
+
 class DeleteWorker(QThread):
     """Verplaatst bestanden naar de prullenbak op de achtergrond."""
 
@@ -68,7 +98,7 @@ class DeleteWorker(QThread):
 
 
 class _ThumbnailSignals(QObject):
-    ready = Signal(str, object)  # pad, PNG-bytes of None
+    ready = Signal(str, int, object)  # pad, gevraagd formaat, PNG-bytes of None
 
 
 class _ThumbnailTask(QRunnable):
@@ -84,13 +114,13 @@ class _ThumbnailTask(QRunnable):
             data = thumbnail_png(self.path, self.size)
         except Exception:
             data = None
-        self.signals.ready.emit(self.path, data)
+        self.signals.ready.emit(self.path, self.size, data)
 
 
 class ThumbnailService(QObject):
     """Laadt miniaturen parallel en voorkomt dubbele opdrachten."""
 
-    ready = Signal(str, object)
+    ready = Signal(str, int, object)
 
     def __init__(self, max_threads: int = 4, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -114,6 +144,6 @@ class ThumbnailService(QObject):
         self._pool.clear()
         self._pool.waitForDone(2000)
 
-    def _on_ready(self, path: str, data: object) -> None:
-        self._pending = {key for key in self._pending if key[0] != path}
-        self.ready.emit(path, data)
+    def _on_ready(self, path: str, size: int, data: object) -> None:
+        self._pending.discard((path, size))
+        self.ready.emit(path, size, data)

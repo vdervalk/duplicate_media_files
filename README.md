@@ -1,8 +1,12 @@
 # Duplicate Media Finder
 
-Vindt **exacte duplicaten** van foto's en video's in een map (inclusief submappen), toont ze in
-een overzicht en laat je de kopieën naar de **Windows-prullenbak** verplaatsen of de map ervan
-openen in **Verkenner**.
+Twee opruimklussen in één venster:
+
+1. **Duplicaten** - vindt exacte kopieën van foto's en video's in een map met submappen.
+2. **Onscherpe foto's** - rangschikt foto's van meest vaag naar scherp.
+
+In beide gevallen kun je vanuit het overzicht bestanden naar de **Windows-prullenbak**
+verplaatsen of hun map openen in **Verkenner**.
 
 Gebouwd voor Windows 11, werkt ook op macOS en Linux.
 
@@ -26,6 +30,55 @@ Dat wordt bepaald met SHA-256, in drie trappen van goedkoop naar duur:
 **Gevolg:** geen valse positieven. Een foto die opnieuw is opgeslagen, bijgesneden of waarvan de
 EXIF-datum is aangepast, is een *ander* bestand en wordt bewust niet als duplicaat gemeld.
 Bestandsnaam, map en datum spelen geen enkele rol.
+
+---
+
+## Onscherpe foto's zoeken
+
+Tweede tabblad, met een eigen meting. Hier geldt een ander soort zekerheid dan bij duplicaten:
+dit is een **inschatting**, geen feit. De lijst is een rangschikking van verdacht naar scherp, en
+jij beslist aan de hand van de miniatuur.
+
+![Overzicht van onscherpe foto's](docs/screenshot-onscherp.png)
+
+### Hoe het meet
+
+Elke foto krijgt een score op basis van **randscherpte** (de variantie van de Laplaciaan). Veel
+scherpe overgangen betekent veel detail, en dus een scherpe foto.
+
+| Maatregel | Waarom |
+|---|---|
+| Meten op de **scherpste tegel** van 4 x 4 | Een portret met bewust vage achtergrond blijft zo buiten schot |
+| Vast analyseformaat van 1000 pixels | Scores van een 12-megapixelfoto en een 50-megapixelfoto blijven vergelijkbaar |
+| Apart label **weinig detail** | Een egale lucht of witte muur scoort laag zonder onscherp te zijn |
+| RAW via de ingebedde voorbeeld-JPEG | Snel, en goed genoeg om scherpte te beoordelen |
+
+Ter illustratie, dezelfde testfoto in verschillende staten:
+
+| Staat | Score |
+|---|---:|
+| Scherp | 1337 |
+| Heel licht onscherp | 450 |
+| Licht onscherp | 83 |
+| Merkbaar onscherp | 7 |
+| Egale lucht (scherp, geen detail) | 0 |
+
+### De grens instellen
+
+De schuifregelaar bepaalt vanaf welke score een foto "onscherp" heet. Standaard staat die op
+100. De telling rechts loopt meteen mee, bijvoorbeeld *87 onscherp van 1240 foto's*.
+
+Schuif naar links om alleen de hopeloze gevallen te zien, naar rechts om ook twijfelgevallen
+mee te nemen. Omdat camera's en onderwerpen verschillen, is even kalibreren op je eigen foto's
+de beste aanpak: zet de grens waar de miniaturen er echt mis uitzien.
+
+### Wat de meting niet kan
+
+- **Bewogen onderwerp op een scherpe achtergrond** wordt niet herkend; ergens in het beeld is
+  immers wel detail.
+- **Foto's zonder detail** (lucht, sneeuw, muur) krijgen het label *weinig detail* en staan
+  standaard verborgen. Zet het vinkje aan om ze te bekijken.
+- **Video's doen niet mee.**
 
 ---
 
@@ -131,7 +184,7 @@ dan *Scan starten*.
 
 | Toets | Actie |
 |-------|-------|
-| `F5` | Lijst vernieuwen |
+| `F5` | Lijst vernieuwen (van het tabblad dat je bekijkt) |
 | `Ctrl+O` | Map toevoegen |
 | `Ctrl+D` | Duplicaten aanvinken |
 | `Ctrl+Shift+D` | Vinkjes wissen |
@@ -206,7 +259,7 @@ Instellingen worden automatisch bewaard en bij de volgende start teruggezet.
 | Wat | Locatie (Windows) |
 |-----|-------------------|
 | Instellingen | `%APPDATA%\DuplicateMediaFinder\settings.json` |
-| Hashcache | `%APPDATA%\DuplicateMediaFinder\hashcache.sqlite3` |
+| Hashcache en scherptescores | `%APPDATA%\DuplicateMediaFinder\hashcache.sqlite3` |
 | Miniaturen | `%APPDATA%\DuplicateMediaFinder\thumbnails\` |
 
 Beide caches zijn te wissen via het menu *Extra*. Ze bevatten alleen paden, hashes en kleine
@@ -232,7 +285,7 @@ kost nul schijftoegang.
 
 ```bash
 pip install -r requirements-dev.txt
-pytest                       # 54 tests: hashing, scanner, export, acties, GUI
+pytest                       # 95 tests: hashing, scanner, scherpte, export, acties, GUI
 ```
 
 De GUI-tests draaien headless (`QT_QPA_PLATFORM=offscreen`).
@@ -248,8 +301,10 @@ dupefinder/
   scanner.py      doorzoeken, groeperen, voortgang, annuleren
   actions.py      verwijderplan, prullenbak, Verkenner
   exporter.py     JSON/CSV opslaan en laden
+  sharpness.py    scherptemeting per foto (Laplaciaan, tegels, contrast)
+  blurscan.py     scherptescan over hele mappen, met cache
   thumbnails.py   miniaturen (Pillow, HEIC, videoframe via ffmpeg)
-  gui/            hoofdvenster, instellingendialoog, achtergrondtaken
+  gui/            hoofdvenster, tabbladen, voorbeeldpaneel, achtergrondtaken
 ```
 
 Alle logica buiten `gui/` werkt zonder Qt en is los te gebruiken in scripts.
@@ -266,3 +321,7 @@ Alle logica buiten `gui/` werkt zonder Qt en is los te gebruiken in scripts.
   in de .exe). Zonder ffmpeg toont het voorbeeldvenster "Geen voorbeeld beschikbaar".
 - **Netwerkschijven** werken, maar zijn traag: elk kandidaatbestand moet over het netwerk
   gelezen worden.
+- **Onscherpte is een schatting.** Anders dan bij duplicaten kan de meting ernaast zitten;
+  beoordeel altijd de miniatuur voordat je iets weggooit.
+- **De scherptemeting is zwaarder dan de duplicatenscan**, want elke foto moet echt worden
+  gedecodeerd. De score komt wel in de cache, dus een tweede keer kijken is vrijwel gratis.
