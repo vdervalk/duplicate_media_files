@@ -16,12 +16,18 @@ try:
 except Exception:
     pass
 
+try:
+    # libraw hoort bij rawpy; zonder deze bestanden kan een RAW niet open.
+    binaries += collect_dynamic_libs("rawpy")
+except Exception:
+    pass
+
 analysis = Analysis(
     ["run.py"],
     pathex=[],
     binaries=binaries,
     datas=[("assets/icon.ico", "assets"), ("assets/icon.png", "assets")],
-    hiddenimports=["send2trash"],
+    hiddenimports=["send2trash", "rawpy", "pillow_heif"],
     hookspath=[],
     runtime_hooks=[],
     excludes=[

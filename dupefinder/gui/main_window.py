@@ -9,10 +9,10 @@ from PySide6.QtCore import QPoint, QSize, Qt, QTimer, Slot
 from PySide6.QtGui import QAction, QIcon, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QTabWidget,
     QApplication,
     QCheckBox,
     QFileDialog,
-    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -42,10 +42,13 @@ from ..actions import (
 from ..cache import HashCache
 from ..config import ScanConfig, cache_path
 from ..exporter import export_csv, export_json, load_json
+from ..blurscan import SharpnessResult
 from ..scanner import DuplicateGroup, ScanProgress, ScanResult, format_bytes
 from ..thumbnails import clear_thumbnail_cache
+from .blur_tab import BlurTab
+from .preview import PreviewPanel
 from .settings_dialog import SettingsDialog
-from .workers import DeleteWorker, ScanWorker, ThumbnailService
+from .workers import DeleteWorker, ScanWorker, SharpnessWorker, ThumbnailService
 
 PATH_ROLE = Qt.ItemDataRole.UserRole
 GROUP_ROLE = Qt.ItemDataRole.UserRole + 1
@@ -70,6 +73,7 @@ class MainWindow(QMainWindow):
         self.config = ScanConfig.load()
         self.result: ScanResult | None = None
         self.scan_worker: ScanWorker | None = None
+        self.sharpness_worker: SharpnessWorker | None = None
         self.delete_worker: DeleteWorker | None = None
         self.thumbnails = ThumbnailService(max_threads=4, parent=self)
         self.thumbnails.ready.connect(self._on_thumbnail_ready)
@@ -77,7 +81,6 @@ class MainWindow(QMainWindow):
         self._no_preview: set[str] = set()
         self._items_by_path: dict[str, QTreeWidgetItem] = {}
         self._updating_checks = False
-        self._preview_path: str | None = None
 
         self.setWindowTitle(f"{__app_name__} {__version__}")
         self.resize(1280, 820)
@@ -101,8 +104,17 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(self._build_folders_group())
         layout.addLayout(self._build_scan_row())
-        layout.addWidget(self._build_results_splitter(), stretch=1)
-        layout.addLayout(self._build_action_row())
+
+        self.tabs = QTabWidget()
+        self.tabs.addTab(self._build_duplicates_tab(), "Duplicaten")
+        self.blur_tab = BlurTab(self.thumbnails)
+        self.blur_tab.delete_requested.connect(self._delete_photo_paths)
+        self.blur_tab.status_message.connect(lambda text: self.statusBar().showMessage(text, 8000))
+        self.blur_tab.preview.open_requested.connect(self._open_path)
+        self.blur_tab.preview.reveal_requested.connect(self._reveal_path)
+        self.tabs.addTab(self.blur_tab, "Onscherpe foto's")
+        self.tabs.currentChanged.connect(self._on_tab_changed)
+        layout.addWidget(self.tabs, stretch=1)
 
         self.setCentralWidget(central)
         self.statusBar().showMessage("Klaar. Kies een map en start de scan.")
@@ -153,6 +165,14 @@ class MainWindow(QMainWindow):
         row.addWidget(self.phase_label)
         return row
 
+    def _build_duplicates_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(0, 6, 0, 0)
+        layout.addWidget(self._build_results_splitter(), stretch=1)
+        layout.addLayout(self._build_action_row())
+        return tab
+
     def _build_results_splitter(self) -> QWidget:
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
@@ -198,45 +218,15 @@ class MainWindow(QMainWindow):
         self.tree.setColumnWidth(2, 130)
         left_layout.addWidget(self.tree, stretch=1)
 
+        self.preview = PreviewPanel(self.thumbnails)
+        self.preview.open_requested.connect(self._open_path)
+        self.preview.reveal_requested.connect(self._reveal_path)
         splitter.addWidget(left)
-        splitter.addWidget(self._build_preview_panel())
+        splitter.addWidget(self.preview)
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([900, 340])
         return splitter
-
-    def _build_preview_panel(self) -> QWidget:
-        panel = QWidget()
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(6, 0, 0, 0)
-
-        title = QLabel("Voorbeeld")
-        title.setStyleSheet("font-weight: bold;")
-        layout.addWidget(title)
-
-        self.preview_label = QLabel("Selecteer een bestand")
-        self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.preview_label.setMinimumHeight(PREVIEW_SIZE)
-        self.preview_label.setFrameShape(QFrame.Shape.StyledPanel)
-        self.preview_label.setStyleSheet("color: gray;")
-        layout.addWidget(self.preview_label)
-
-        self.preview_info = QLabel("")
-        self.preview_info.setWordWrap(True)
-        self.preview_info.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        layout.addWidget(self.preview_info)
-
-        button_row = QHBoxLayout()
-        open_file_button = QPushButton("Bestand openen")
-        open_file_button.clicked.connect(self._open_preview_file)
-        open_folder_button = QPushButton("Map openen")
-        open_folder_button.clicked.connect(self._reveal_preview_file)
-        button_row.addWidget(open_file_button)
-        button_row.addWidget(open_folder_button)
-        layout.addLayout(button_row)
-
-        layout.addStretch(1)
-        return panel
 
     def _build_action_row(self) -> QHBoxLayout:
         row = QHBoxLayout()
@@ -272,7 +262,7 @@ class MainWindow(QMainWindow):
         self._add_action(file_menu, "Afsluiten", self.close, "Ctrl+Q")
 
         edit_menu = menu_bar.addMenu("Be&werken")
-        self._add_action(edit_menu, "Lijst vernieuwen", self._refresh_list, "F5")
+        self._add_action(edit_menu, "Lijst vernieuwen", self._refresh_active_tab, "F5")
         edit_menu.addSeparator()
         self._add_action(edit_menu, "Duplicaten aanvinken", self._select_all_duplicates, "Ctrl+D")
         self._add_action(edit_menu, "Vinkjes wissen", self._clear_checks, "Ctrl+Shift+D")
@@ -336,8 +326,17 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ scannen
 
+    def _scanning(self) -> bool:
+        return self.scan_worker is not None or self.sharpness_worker is not None
+
+    def _on_tab_changed(self, index: int) -> None:
+        self.scan_button.setText(
+            "2. Scan starten" if index == 0 else "2. Scherpte meten"
+        )
+
     def _start_scan(self) -> None:
-        if self.scan_worker is not None:
+        """Start de scan die bij het actieve tabblad hoort."""
+        if self._scanning():
             return
         self._sync_roots_to_config()
         problems = self.config.validate()
@@ -345,13 +344,24 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Scan kan niet starten", "\n".join(problems))
             return
 
-        self._clear_results()
         self.scan_button.setEnabled(False)
         self.cancel_button.setEnabled(True)
         self.progress_bar.setRange(0, 0)
         self.progress_bar.setFormat("")
-        self.phase_label.setText("Mappen doorzoeken...")
 
+        if self.tabs.currentIndex() == 1:
+            self.blur_tab.clear()
+            self.phase_label.setText("Foto's verzamelen...")
+            self.sharpness_worker = SharpnessWorker(self.config, parent=self)
+            self.sharpness_worker.progressed.connect(self._on_scan_progress)
+            self.sharpness_worker.completed.connect(self._on_sharpness_completed)
+            self.sharpness_worker.failed.connect(self._on_scan_failed)
+            self.sharpness_worker.finished.connect(self._on_scan_thread_finished)
+            self.sharpness_worker.start()
+            return
+
+        self._clear_results()
+        self.phase_label.setText("Mappen doorzoeken...")
         self.scan_worker = ScanWorker(self.config, parent=self)
         self.scan_worker.progressed.connect(self._on_scan_progress)
         self.scan_worker.completed.connect(self._on_scan_completed)
@@ -360,8 +370,10 @@ class MainWindow(QMainWindow):
         self.scan_worker.start()
 
     def _cancel_scan(self) -> None:
-        if self.scan_worker is not None:
-            self.scan_worker.cancel()
+        for worker in (self.scan_worker, self.sharpness_worker):
+            if worker is not None:
+                worker.cancel()
+        if self._scanning():
             self.phase_label.setText("Bezig met stoppen...")
             self.cancel_button.setEnabled(False)
 
@@ -384,6 +396,7 @@ class MainWindow(QMainWindow):
     @Slot()
     def _on_scan_thread_finished(self) -> None:
         self.scan_worker = None
+        self.sharpness_worker = None
         self.scan_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
         self.progress_bar.setRange(0, 100)
@@ -412,6 +425,31 @@ class MainWindow(QMainWindow):
                 self,
                 "Geen duplicaten",
                 "Er zijn geen byte-identieke mediabestanden gevonden in de opgegeven mappen.",
+            )
+
+    @Slot(object)
+    def _on_sharpness_completed(self, result: SharpnessResult) -> None:
+        self.blur_tab.set_result(result)
+        stats = result.stats
+        blurry = len(result.blurry(self.blur_tab.threshold))
+        message = (
+            f"{len(result.entries)} foto's gemeten in {stats.duration_seconds:.1f} s | "
+            f"{blurry} onder de huidige grens | "
+            f"{len(result.low_detail())} met weinig detail"
+        )
+        if stats.cache_hits:
+            message += f" | {stats.cache_hits} uit de cache"
+        if result.cancelled:
+            message = "Meting gestopt. " + message
+        if stats.skipped:
+            message += f" | {stats.skipped} overgeslagen (niet te openen)"
+        self.statusBar().showMessage(message)
+        self.phase_label.setText("Klaar")
+        if not result.entries and not result.cancelled:
+            QMessageBox.information(
+                self,
+                "Geen foto's gemeten",
+                "Er zijn geen foto's gevonden die gemeten konden worden.",
             )
 
     # ------------------------------------------------------------------ resultaten
@@ -624,77 +662,44 @@ class MainWindow(QMainWindow):
             self.thumbnails.request(path, THUMBNAIL_SIZE)
 
     @Slot(str, object)
-    def _on_thumbnail_ready(self, path: str, data: object) -> None:
+    def _on_thumbnail_ready(self, path: str, size: int, data: object) -> None:
+        if size != THUMBNAIL_SIZE:
+            return  # het voorbeeldpaneel zorgt voor zijn eigen formaat
         pixmap = QPixmap()
         if isinstance(data, (bytes, bytearray)) and data:
             pixmap.loadFromData(bytes(data), "PNG")
         if pixmap.isNull():
-            # Geen voorbeeld mogelijk (RAW zonder decoder, video zonder ffmpeg, ...).
+            # Geen miniatuur mogelijk (RAW zonder decoder, video zonder ffmpeg, ...).
             self._no_preview.add(os.path.normcase(path))
-            if self._preview_path and os.path.normcase(self._preview_path) == os.path.normcase(
-                path
-            ):
-                self.preview_label.setPixmap(QPixmap())
-                self.preview_label.setText("Geen voorbeeld beschikbaar")
             return
         self._pixmaps[path] = pixmap
         item = self._items_by_path.get(os.path.normcase(path))
         if item is not None and self.thumbs_check.isChecked():
             item.setIcon(0, QIcon(pixmap))
-        if self._preview_path and os.path.normcase(self._preview_path) == os.path.normcase(path):
-            self._show_preview_pixmap(pixmap)
 
     # ------------------------------------------------------------------ voorbeeld
 
     def _on_tree_selection_changed(self) -> None:
         items = self.tree.selectedItems()
-        if not items:
-            self._set_preview(None)
-            return
-        path = items[0].data(0, PATH_ROLE)
-        self._set_preview(str(path) if path else None)
+        path = str(items[0].data(0, PATH_ROLE) or "") if items else ""
+        self._set_preview(path or None)
 
     def _set_preview(self, path: str | None) -> None:
-        self._preview_path = path
         if path is None:
-            self.preview_label.setPixmap(QPixmap())
-            self.preview_label.setText("Selecteer een bestand")
-            self.preview_info.setText("")
+            self.preview.show_file(None)
             return
-
         item = self._items_by_path.get(os.path.normcase(path))
         size = int(item.data(0, SIZE_ROLE) or 0) if item else 0
         modified = item.text(2) if item else ""
         digest = str(item.data(0, DIGEST_ROLE) or "") if item else ""
-
-        self.preview_info.setText(
+        self.preview.show_file(
+            path,
             f"<b>{os.path.basename(path)}</b><br>"
             f"{os.path.dirname(path)}<br><br>"
             f"Grootte: {format_bytes(size)}<br>"
             f"Gewijzigd: {modified}<br>"
-            f"SHA-256: <span style='font-family:monospace'>{digest[:32]}...</span>"
+            f"SHA-256: <span style='font-family:monospace'>{digest[:32]}...</span>",
         )
-
-        pixmap = self._pixmaps.get(path)
-        if pixmap is not None and not pixmap.isNull():
-            self._show_preview_pixmap(pixmap)
-        elif os.path.normcase(path) in self._no_preview:
-            self.preview_label.setPixmap(QPixmap())
-            self.preview_label.setText("Geen voorbeeld beschikbaar")
-        else:
-            self.preview_label.setPixmap(QPixmap())
-            self.preview_label.setText("Voorbeeld laden...")
-            self.thumbnails.request(path, PREVIEW_SIZE)
-
-    def _show_preview_pixmap(self, pixmap: QPixmap) -> None:
-        scaled = pixmap.scaled(
-            self.preview_label.width() - 8,
-            PREVIEW_SIZE,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        self.preview_label.setText("")
-        self.preview_label.setPixmap(scaled)
 
     # ------------------------------------------------------------------ acties
 
@@ -714,39 +719,27 @@ class MainWindow(QMainWindow):
             menu.addAction("Groep inklappen", lambda: item.setExpanded(False))
         menu.exec(self.tree.viewport().mapToGlobal(position))
 
-    def _reveal_item(self, item: QTreeWidgetItem) -> None:
-        path = item.data(0, PATH_ROLE)
-        if not path:
-            return
+    def _open_path(self, path: str) -> None:
         try:
-            reveal_in_file_manager(str(path))
+            open_path(path)
         except ActionError as exc:
             QMessageBox.warning(self, "Openen mislukt", str(exc))
+
+    def _reveal_path(self, path: str) -> None:
+        try:
+            reveal_in_file_manager(path)
+        except ActionError as exc:
+            QMessageBox.warning(self, "Openen mislukt", str(exc))
+
+    def _reveal_item(self, item: QTreeWidgetItem) -> None:
+        path = item.data(0, PATH_ROLE)
+        if path:
+            self._reveal_path(str(path))
 
     def _open_item(self, item: QTreeWidgetItem) -> None:
         path = item.data(0, PATH_ROLE)
-        if not path:
-            return
-        try:
-            open_path(str(path))
-        except ActionError as exc:
-            QMessageBox.warning(self, "Openen mislukt", str(exc))
-
-    def _open_preview_file(self) -> None:
-        if not self._preview_path:
-            return
-        try:
-            open_path(self._preview_path)
-        except ActionError as exc:
-            QMessageBox.warning(self, "Openen mislukt", str(exc))
-
-    def _reveal_preview_file(self) -> None:
-        if not self._preview_path:
-            return
-        try:
-            reveal_in_file_manager(self._preview_path)
-        except ActionError as exc:
-            QMessageBox.warning(self, "Openen mislukt", str(exc))
+        if path:
+            self._open_path(str(path))
 
     def _copy_selected_paths(self) -> None:
         paths = [
@@ -805,10 +798,44 @@ class MainWindow(QMainWindow):
         if confirm.exec() != QMessageBox.StandardButton.Yes:
             return
 
+        self._start_delete_worker(plan.to_delete)
+
+    def _delete_photo_paths(self, paths: list[str]) -> None:
+        """Verwijderroute van het tabblad met onscherpe foto's."""
+        if self.delete_worker is not None:
+            return
+        existing = [p for p in paths if os.path.exists(p)]
+        if not existing:
+            self.statusBar().showMessage("Die foto's staan er niet meer.", 5000)
+            return
+        total_bytes = sum(os.path.getsize(p) for p in existing)
+
+        confirm = QMessageBox(self)
+        confirm.setWindowTitle("Naar prullenbak verplaatsen")
+        confirm.setIcon(QMessageBox.Icon.Question)
+        confirm.setText(
+            f"{len(existing)} foto's gaan naar de prullenbak.\n"
+            f"Dat maakt {format_bytes(total_bytes)} vrij."
+        )
+        confirm.setInformativeText(
+            "Onscherpte is een inschatting, geen zekerheid. Controleer de miniaturen "
+            "voordat je verwijdert.\n\n"
+            "De bestanden gaan naar de systeemprullenbak en kunnen daar hersteld worden."
+        )
+        confirm.setDetailedText("\n".join(existing))
+        confirm.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel
+        )
+        confirm.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        if confirm.exec() != QMessageBox.StandardButton.Yes:
+            return
+        self._start_delete_worker(existing)
+
+    def _start_delete_worker(self, paths: list[str]) -> None:
         self.delete_button.setEnabled(False)
         self.scan_button.setEnabled(False)
-        self.progress_bar.setRange(0, len(plan.to_delete))
-        self.delete_worker = DeleteWorker(plan.to_delete, parent=self)
+        self.progress_bar.setRange(0, len(paths))
+        self.delete_worker = DeleteWorker(paths, parent=self)
         self.delete_worker.progressed.connect(self._on_delete_progress)
         self.delete_worker.completed.connect(self._on_delete_completed)
         self.delete_worker.finished.connect(self._on_delete_thread_finished)
@@ -823,6 +850,7 @@ class MainWindow(QMainWindow):
     @Slot(object)
     def _on_delete_completed(self, outcome) -> None:
         self._remove_paths_from_view(outcome.deleted)
+        self.blur_tab.remove_paths(outcome.deleted)
         with HashCache(cache_path(), enabled=self.config.use_cache) as cache:
             for path in outcome.deleted:
                 cache.forget(path)
@@ -848,6 +876,13 @@ class MainWindow(QMainWindow):
         self.progress_bar.setFormat("")
         self.phase_label.setText("Klaar")
         self._update_selection_summary()
+
+    def _refresh_active_tab(self) -> None:
+        """F5: vernieuw het overzicht van het tabblad dat je nu bekijkt."""
+        if self.tabs.currentIndex() == 1:
+            self.blur_tab.refresh()
+        else:
+            self._refresh_list()
 
     def _refresh_list(self) -> None:
         """Controleer de lijst opnieuw tegen de schijf en ruim afgehandelde groepen op.
@@ -1027,6 +1062,8 @@ class MainWindow(QMainWindow):
         clear_thumbnail_cache()
         self._pixmaps.clear()
         self._no_preview.clear()
+        self.preview.clear_cache()
+        self.blur_tab.preview.clear_cache()
         self.statusBar().showMessage("Miniatuurcache gewist.", 4000)
 
     def _show_about(self) -> None:
@@ -1034,18 +1071,23 @@ class MainWindow(QMainWindow):
             self,
             f"Over {__app_name__}",
             f"<b>{__app_name__} {__version__}</b><br><br>"
-            "Vindt byte-identieke foto- en videobestanden via SHA-256.<br>"
-            "Alleen bestanden met exact dezelfde inhoud worden als duplicaat "
-            "gemeld; er zijn geen valse positieven.<br><br>"
+            "<b>Duplicaten</b>: byte-identieke foto's en video's via SHA-256. "
+            "Alleen bestanden met exact dezelfde inhoud worden gemeld, dus geen "
+            "valse positieven.<br><br>"
+            "<b>Onscherpe foto's</b>: een schatting op basis van randscherpte "
+            "(variantie van de Laplaciaan, gemeten op de scherpste tegel). "
+            "Dit is een rangschikking, geen oordeel: beoordeel altijd de "
+            "miniatuur voordat je verwijdert.<br><br>"
             "Verwijderde bestanden gaan naar de systeemprullenbak.",
         )
 
     # ------------------------------------------------------------------ afsluiten
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt-naamgeving
-        if self.scan_worker is not None:
-            self.scan_worker.cancel()
-            self.scan_worker.wait(3000)
+        for worker in (self.scan_worker, self.sharpness_worker):
+            if worker is not None:
+                worker.cancel()
+                worker.wait(3000)
         if self.delete_worker is not None:
             self.delete_worker.cancel()
             self.delete_worker.wait(3000)

@@ -1,8 +1,10 @@
 # Basis (verplicht)
 PySide6-Essentials>=6.6      # gebruikersinterface (Qt)
 Send2Trash>=1.8              # verwijderen naar de Windows-prullenbak
-Pillow>=10.0                 # miniaturen van foto's
+Pillow>=10.0                 # foto's openen en miniaturen maken
+numpy>=1.24                  # scherpteberekening voor onscherpe foto's
 
 # Optioneel, maar aangeraden
-pillow-heif>=0.15            # voorbeeldweergave van HEIC/HEIF (iPhone-foto's)
+pillow-heif>=0.15            # HEIC/HEIF (iPhone-foto's) openen
 imageio-ffmpeg>=0.4.9        # voorbeeldweergave van video's (levert ffmpeg mee)
+rawpy>=0.19                  # RAW-bestanden (CR3, NEF, ARW, ...) voor de scherptemeting

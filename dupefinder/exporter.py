@@ -154,3 +154,47 @@ def export_csv(result: ScanResult, path: str | os.PathLike[str]) -> None:
                         entry.kind,
                     ]
                 )
+
+
+SHARPNESS_CSV_COLUMNS = [
+    "bestand",
+    "map",
+    "volledig_pad",
+    "score",
+    "oordeel",
+    "contrast",
+    "breedte",
+    "hoogte",
+    "grootte_bytes",
+    "grootte",
+    "gewijzigd",
+]
+
+
+def export_sharpness_csv(
+    entries,
+    path: str | os.PathLike[str],
+    threshold: float,
+) -> None:
+    """Schrijf de scherptemetingen weg als CSV (puntkomma's, BOM voor Excel)."""
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("w", newline="", encoding="utf-8-sig") as handle:
+        writer = csv.writer(handle, delimiter=";")
+        writer.writerow(SHARPNESS_CSV_COLUMNS)
+        for entry in entries:
+            writer.writerow(
+                [
+                    entry.name,
+                    entry.folder,
+                    entry.path,
+                    f"{entry.score:.1f}",
+                    entry.label(threshold),
+                    f"{entry.detail:.1f}",
+                    entry.width,
+                    entry.height,
+                    entry.size,
+                    format_bytes(entry.size),
+                    _iso(entry.mtime_ns / 1_000_000_000) if entry.mtime_ns else "",
+                ]
+            )

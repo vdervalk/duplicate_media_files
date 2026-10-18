@@ -18,6 +18,16 @@ CREATE TABLE IF NOT EXISTS file_hashes (
     partial     TEXT,
     full        TEXT
 );
+
+CREATE TABLE IF NOT EXISTS sharpness (
+    path        TEXT PRIMARY KEY,
+    size        INTEGER NOT NULL,
+    mtime_ns    INTEGER NOT NULL,
+    score       REAL NOT NULL,
+    detail      REAL NOT NULL,
+    width       INTEGER NOT NULL DEFAULT 0,
+    height      INTEGER NOT NULL DEFAULT 0
+);
 """
 
 
@@ -93,6 +103,60 @@ class HashCache:
             except sqlite3.Error:
                 pass
 
+    # -- scherptemetingen -----------------------------------------------------
+
+    def get_sharpness(
+        self, path: str, size: int, mtime_ns: int
+    ) -> tuple[float, float, int, int] | None:
+        """Geef ``(score, detail, breedte, hoogte)`` voor een ongewijzigd bestand."""
+        if not self._conn:
+            return None
+        with self._lock:
+            try:
+                row = self._conn.execute(
+                    "SELECT score, detail, width, height FROM sharpness"
+                    " WHERE path = ? AND size = ? AND mtime_ns = ?",
+                    (path, size, mtime_ns),
+                ).fetchone()
+            except sqlite3.Error:
+                return None
+        if not row:
+            return None
+        return (float(row[0]), float(row[1]), int(row[2]), int(row[3]))
+
+    def put_sharpness(
+        self,
+        path: str,
+        size: int,
+        mtime_ns: int,
+        score: float,
+        detail: float,
+        width: int = 0,
+        height: int = 0,
+    ) -> None:
+        if not self._conn:
+            return
+        with self._lock:
+            try:
+                self._conn.execute(
+                    """
+                    INSERT INTO sharpness (path, size, mtime_ns, score, detail, width, height)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(path) DO UPDATE SET
+                        size = excluded.size,
+                        mtime_ns = excluded.mtime_ns,
+                        score = excluded.score,
+                        detail = excluded.detail,
+                        width = excluded.width,
+                        height = excluded.height
+                    """,
+                    (path, size, mtime_ns, score, detail, width, height),
+                )
+            except sqlite3.Error:
+                pass
+
+    # -- opruimen -------------------------------------------------------------
+
     def forget(self, path: str) -> None:
         """Verwijder een pad uit de cache (na verwijderen of verplaatsen)."""
         if not self._conn:
@@ -100,6 +164,7 @@ class HashCache:
         with self._lock:
             try:
                 self._conn.execute("DELETE FROM file_hashes WHERE path = ?", (path,))
+                self._conn.execute("DELETE FROM sharpness WHERE path = ?", (path,))
             except sqlite3.Error:
                 pass
 
@@ -118,6 +183,7 @@ class HashCache:
         with self._lock:
             try:
                 self._conn.execute("DELETE FROM file_hashes")
+                self._conn.execute("DELETE FROM sharpness")
                 self._conn.commit()
             except sqlite3.Error:
                 pass
