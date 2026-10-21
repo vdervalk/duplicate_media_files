@@ -140,6 +140,15 @@ class ThumbnailService(QObject):
     def clear_pending(self) -> None:
         self._pending.clear()
 
+    def drop_queued(self) -> None:
+        """Gooi opdrachten weg die nog niet gestart zijn.
+
+        Na snel scrollen staat de wachtrij vol met rijen die allang uit beeld
+        zijn; die eerst afwerken laat de zichtbare rijen wachten.
+        """
+        self._pool.clear()
+        self._pending.clear()
+
     def shutdown(self) -> None:
         self._pool.clear()
         self._pool.waitForDone(2000)

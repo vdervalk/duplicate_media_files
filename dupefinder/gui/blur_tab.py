@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import os
+from bisect import bisect_left
 from datetime import datetime
 
 from PySide6.QtCore import QPoint, QSize, Qt, QTimer, Signal
@@ -55,10 +56,16 @@ def threshold_to_slider(threshold: float) -> int:
 
 
 class _SortableItem(QTreeWidgetItem):
-    """Sorteert kolommen op hun onderliggende getal in plaats van op tekst."""
+    """Sorteert kolommen op hun onderliggende getal in plaats van op tekst.
+
+    De sorteerkolom staat op de klasse: bij tienduizenden rijen wordt ``__lt__``
+    honderdduizenden keren aangeroepen, en dan telt elke Qt-aanroep mee.
+    """
+
+    sort_column = 1
 
     def __lt__(self, other: QTreeWidgetItem) -> bool:  # noqa: D105 - Qt-naamgeving
-        column = self.treeWidget().sortColumn() if self.treeWidget() else 0
+        column = _SortableItem.sort_column
         mine = self.data(column, SORT_ROLE)
         theirs = other.data(column, SORT_ROLE)
         if mine is not None and theirs is not None:
@@ -78,6 +85,13 @@ class BlurTab(QWidget):
         self.thumbnails.ready.connect(self._on_thumbnail_ready)
         self.result: SharpnessResult | None = None
         self._items_by_path: dict[str, QTreeWidgetItem] = {}
+        self._entries_by_path: dict[str, SharpnessEntry] = {}
+        #: Gesorteerde scores van foto's met genoeg detail; telt met bisect in
+        #: plaats van telkens de hele lijst door te lopen.
+        self._scores_with_detail: list[float] = []
+        self._low_detail_total = 0
+        #: Aangevinkte foto's, bijgehouden terwijl je klikt (normcase -> echt pad).
+        self._checked: dict[str, str] = {}
         self._pixmaps: dict[str, QPixmap] = {}
         self._no_thumbnail: set[str] = set()
         self._updating = False
@@ -88,6 +102,20 @@ class BlurTab(QWidget):
         self._thumb_timer.setSingleShot(True)
         self._thumb_timer.setInterval(120)
         self._thumb_timer.timeout.connect(self._request_visible_thumbnails)
+
+        # Tijdens het slepen van de schuifregelaar wordt de lijst pas bijgewerkt
+        # als je even stilhoudt; anders kost elke tussenstap een rondgang.
+        self._filter_timer = QTimer(self)
+        self._filter_timer.setSingleShot(True)
+        self._filter_timer.setInterval(120)
+        self._filter_timer.timeout.connect(self._apply_visibility)
+
+        # Hetzelfde voor het voorbeeld: snel door de lijst pijlen zet anders een
+        # rij zware decodeeropdrachten in de wachtrij.
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.setInterval(160)
+        self._preview_timer.timeout.connect(self._load_preview)
 
     # ------------------------------------------------------------------ opbouw
 
@@ -157,6 +185,9 @@ class BlurTab(QWidget):
         )
         self.tree.setRootIsDecorated(False)
         self.tree.setAlternatingRowColors(True)
+        # Alle rijen even hoog: anders meet Qt bij elke wijziging de rijhoogte
+        # opnieuw, en dat is bij duizenden foto's goed merkbaar.
+        self.tree.setUniformRowHeights(True)
         self.tree.setIconSize(QSize(THUMBNAIL_SIZE, THUMBNAIL_SIZE))
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.tree.setSortingEnabled(True)
@@ -168,6 +199,7 @@ class BlurTab(QWidget):
             lambda item, _col: self.preview.reveal_requested.emit(str(item.data(0, PATH_ROLE)))
         )
         self.tree.verticalScrollBar().valueChanged.connect(lambda _v: self._thumb_timer.start())
+        self.tree.header().sortIndicatorChanged.connect(self._on_sort_changed)
         self.tree.setColumnWidth(0, 300)
         self.tree.setColumnWidth(1, 80)
         self.tree.setColumnWidth(2, 120)
@@ -214,6 +246,10 @@ class BlurTab(QWidget):
     def clear(self) -> None:
         self.result = None
         self._items_by_path.clear()
+        self._entries_by_path.clear()
+        self._scores_with_detail.clear()
+        self._low_detail_total = 0
+        self._checked.clear()
         self._pixmaps.clear()
         self._no_thumbnail.clear()
         self.tree.clear()
@@ -223,11 +259,16 @@ class BlurTab(QWidget):
     def _populate(self) -> None:
         self._updating = True
         self.tree.setSortingEnabled(False)
+        self.tree.setUpdatesEnabled(False)
         self.tree.clear()
         self._items_by_path.clear()
+        self._checked.clear()
+        self._index_entries()
 
+        items: list[QTreeWidgetItem] = []
+        threshold = self.threshold
         for entry in (self.result.sorted_entries() if self.result else []):
-            item = _SortableItem(self.tree)
+            item = _SortableItem()
             item.setFlags(
                 Qt.ItemFlag.ItemIsEnabled
                 | Qt.ItemFlag.ItemIsSelectable
@@ -237,6 +278,7 @@ class BlurTab(QWidget):
             item.setText(0, entry.name)
             item.setToolTip(0, entry.path)
             item.setText(1, f"{entry.score:.0f}")
+            item.setText(2, entry.label(threshold))
             item.setText(3, f"{entry.width} x {entry.height}" if entry.width else "")
             item.setText(4, format_bytes(entry.size))
             item.setText(5, self._timestamp(entry.mtime_ns))
@@ -247,13 +289,25 @@ class BlurTab(QWidget):
             item.setData(3, SORT_ROLE, float(entry.width * entry.height))
             item.setData(4, SORT_ROLE, float(entry.size))
             item.setData(5, SORT_ROLE, float(entry.mtime_ns))
+            items.append(item)
             self._items_by_path[os.path.normcase(entry.path)] = item
 
+        # In een keer toevoegen is bij duizenden rijen veel sneller dan per stuk.
+        self.tree.addTopLevelItems(items)
+        _SortableItem.sort_column = 1
+        self.tree.header().setSortIndicator(1, Qt.SortOrder.AscendingOrder)
         self.tree.setSortingEnabled(True)
-        self.tree.sortByColumn(1, Qt.SortOrder.AscendingOrder)
+        self.tree.setUpdatesEnabled(True)
         self._updating = False
         self._apply_visibility()
         self._thumb_timer.start()
+
+    def _index_entries(self) -> None:
+        """Bouw de opzoektabellen waarmee filteren en tellen snel blijven."""
+        entries = self.result.entries if self.result else []
+        self._entries_by_path = {os.path.normcase(e.path): e for e in entries}
+        self._scores_with_detail = sorted(e.score for e in entries if not e.low_detail)
+        self._low_detail_total = len(entries) - len(self._scores_with_detail)
 
     @staticmethod
     def _timestamp(mtime_ns: int) -> str:
@@ -263,94 +317,134 @@ class BlurTab(QWidget):
 
     # ------------------------------------------------------------------ filters
 
+    def _on_sort_changed(self, column: int, _order: Qt.SortOrder) -> None:
+        _SortableItem.sort_column = column
+
     def _on_threshold_changed(self, _value: int) -> None:
-        self._apply_visibility()
+        # Het getal volgt de regelaar meteen; de lijst volgt zodra je stilhoudt.
+        self.threshold_label.setText(f"{self.threshold:.0f}")
+        self._filter_timer.start()
 
     def _entry_for(self, item: QTreeWidgetItem) -> SharpnessEntry | None:
-        if self.result is None:
-            return None
-        path = os.path.normcase(str(item.data(0, PATH_ROLE) or ""))
-        for entry in self.result.entries:
-            if os.path.normcase(entry.path) == path:
-                return entry
-        return None
+        key = os.path.normcase(str(item.data(0, PATH_ROLE) or ""))
+        return self._entries_by_path.get(key)
 
     def _apply_visibility(self) -> None:
         """Werk oordeelteksten bij en verberg wat buiten de selectie valt."""
+        self._filter_timer.stop()
         threshold = self.threshold
         self.threshold_label.setText(f"{threshold:.0f}")
-        entries = {os.path.normcase(e.path): e for e in (self.result.entries if self.result else [])}
+        only_blurry = self.only_blurry_check.isChecked()
+        show_low_detail = self.low_detail_check.isChecked()
 
         self._updating = True
-        visible = 0
-        for key, item in self._items_by_path.items():
-            entry = entries.get(key)
-            if entry is None:
-                item.setHidden(True)
-                continue
-            item.setText(2, entry.label(threshold))
-            if entry.low_detail:
-                show = self.low_detail_check.isChecked()
-            elif self.only_blurry_check.isChecked():
-                show = entry.is_blurry(threshold)
-            else:
-                show = True
-            item.setHidden(not show)
-            visible += int(show)
-        self._updating = False
+        self.tree.setUpdatesEnabled(False)
+        try:
+            visible = 0
+            for key, item in self._items_by_path.items():
+                entry = self._entries_by_path.get(key)
+                if entry is None:
+                    item.setHidden(True)
+                    continue
+                label = entry.label(threshold)
+                if item.text(2) != label:
+                    item.setText(2, label)
+                if entry.low_detail:
+                    show = show_low_detail
+                elif only_blurry:
+                    show = entry.score < threshold
+                else:
+                    show = True
+                hidden = not show
+                if item.isHidden() != hidden:
+                    item.setHidden(hidden)
+                visible += int(show)
+        finally:
+            self.tree.setUpdatesEnabled(True)
+            self._updating = False
 
         self._visible_count = visible
         self._update_counts()
 
+    def _blurry_count(self, threshold: float) -> int:
+        """Aantal onscherpe foto's, opgezocht in de gesorteerde scores."""
+        return bisect_left(self._scores_with_detail, threshold)
+
     def _update_counts(self) -> None:
-        total = len(self.result.entries) if self.result else 0
+        total = len(self._entries_by_path)
         if not total:
             self.count_label.setText("")
-            self.summary_label.setText("")
-            self.delete_button.setEnabled(False)
+            self._update_summary()
             return
-        blurry = len(self.result.blurry(self.threshold)) if self.result else 0
-        low = len(self.result.low_detail()) if self.result else 0
+        blurry = self._blurry_count(self.threshold)
         self.count_label.setText(
             f"{blurry} onscherp van {total} foto's"
-            + (f" | {low} met weinig detail" if low else "")
+            + (f" | {self._low_detail_total} met weinig detail" if self._low_detail_total else "")
         )
-        checked = self.checked_paths()
-        self.summary_label.setText(f"{len(checked)} aangevinkt" if checked else "")
-        self.delete_button.setEnabled(bool(checked))
+        self._update_summary()
+
+    def _update_summary(self) -> None:
+        """Alleen het aangevinkt-deel bijwerken; dit loopt bij elke klik."""
+        count = len(self._checked)
+        self.summary_label.setText(f"{count} aangevinkt" if count else "")
+        self.delete_button.setEnabled(bool(count))
 
     # ------------------------------------------------------------------ vinkjes
 
     def checked_paths(self) -> list[str]:
-        paths = []
-        for index in range(self.tree.topLevelItemCount()):
-            item = self.tree.topLevelItem(index)
-            if item.checkState(0) == Qt.CheckState.Checked:
-                path = item.data(0, PATH_ROLE)
-                if path:
-                    paths.append(str(path))
-        return paths
+        return list(self._checked.values())
 
-    def _on_item_changed(self, _item: QTreeWidgetItem, column: int) -> None:
+    def _on_item_changed(self, item: QTreeWidgetItem, column: int) -> None:
         if self._updating or column != 0:
             return
-        self._update_counts()
+        path = str(item.data(0, PATH_ROLE) or "")
+        if not path:
+            return
+        key = os.path.normcase(path)
+        if item.checkState(0) == Qt.CheckState.Checked:
+            self._checked[key] = path
+        else:
+            self._checked.pop(key, None)
+        self._update_summary()
 
     def _check_visible(self) -> None:
+        # Bij duizenden rijen is niet het vinkje duur maar het signaal per rij;
+        # we houden de administratie zelf bij en zetten de signalen uit.
         self._updating = True
-        for index in range(self.tree.topLevelItemCount()):
-            item = self.tree.topLevelItem(index)
-            if not item.isHidden():
+        self.tree.setUpdatesEnabled(False)
+        self.tree.blockSignals(True)
+        try:
+            for index in range(self.tree.topLevelItemCount()):
+                item = self.tree.topLevelItem(index)
+                if item.isHidden():
+                    continue
                 item.setCheckState(0, Qt.CheckState.Checked)
-        self._updating = False
-        self._update_counts()
+                path = str(item.data(0, PATH_ROLE) or "")
+                if path:
+                    self._checked[os.path.normcase(path)] = path
+        finally:
+            self.tree.blockSignals(False)
+            self.tree.setUpdatesEnabled(True)
+            self._updating = False
+        self._update_summary()
 
     def _clear_checks(self) -> None:
+        if not self._checked:
+            return
         self._updating = True
-        for index in range(self.tree.topLevelItemCount()):
-            self.tree.topLevelItem(index).setCheckState(0, Qt.CheckState.Unchecked)
-        self._updating = False
-        self._update_counts()
+        self.tree.setUpdatesEnabled(False)
+        self.tree.blockSignals(True)
+        try:
+            for key in list(self._checked):
+                item = self._items_by_path.get(key)
+                if item is not None:
+                    item.setCheckState(0, Qt.CheckState.Unchecked)
+        finally:
+            self.tree.blockSignals(False)
+            self.tree.setUpdatesEnabled(True)
+            self._updating = False
+        self._checked.clear()
+        self._update_summary()
 
     # ------------------------------------------------------------------ acties
 
@@ -362,12 +456,20 @@ class BlurTab(QWidget):
         self.result.entries = [
             e for e in self.result.entries if os.path.normcase(e.path) not in removed
         ]
-        for index in reversed(range(self.tree.topLevelItemCount())):
-            item = self.tree.topLevelItem(index)
-            key = os.path.normcase(str(item.data(0, PATH_ROLE) or ""))
-            if key in removed:
-                self.tree.takeTopLevelItem(index)
-                self._items_by_path.pop(key, None)
+        self.tree.setUpdatesEnabled(False)
+        self._updating = True
+        try:
+            for index in reversed(range(self.tree.topLevelItemCount())):
+                item = self.tree.topLevelItem(index)
+                key = os.path.normcase(str(item.data(0, PATH_ROLE) or ""))
+                if key in removed:
+                    self.tree.takeTopLevelItem(index)
+                    self._items_by_path.pop(key, None)
+                    self._checked.pop(key, None)
+        finally:
+            self._updating = False
+            self.tree.setUpdatesEnabled(True)
+        self._index_entries()
         if self.preview.path and os.path.normcase(self.preview.path) in removed:
             self.preview.show_file(None)
         self._apply_visibility()
@@ -418,6 +520,11 @@ class BlurTab(QWidget):
     # ------------------------------------------------------------------ voorbeeld
 
     def _on_selection_changed(self) -> None:
+        # Pas laden als de selectie even stilstaat: snel door de lijst pijlen
+        # zet anders tientallen foto's in de decodeerwachtrij.
+        self._preview_timer.start()
+
+    def _load_preview(self) -> None:
         items = self.tree.selectedItems()
         if not items:
             self.preview.show_file(None)
@@ -440,6 +547,8 @@ class BlurTab(QWidget):
     # ------------------------------------------------------------------ miniaturen
 
     def _request_visible_thumbnails(self) -> None:
+        # Wat nog in de wachtrij staat gaat over rijen die inmiddels uit beeld zijn.
+        self.thumbnails.drop_queued()
         viewport = self.tree.viewport()
         step = max(16, self.tree.sizeHintForRow(0) or 24)
         y = 0

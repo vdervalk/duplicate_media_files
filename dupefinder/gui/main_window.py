@@ -80,6 +80,9 @@ class MainWindow(QMainWindow):
         self._pixmaps: dict[str, QPixmap] = {}
         self._no_preview: set[str] = set()
         self._items_by_path: dict[str, QTreeWidgetItem] = {}
+        #: Aangevinkte bestanden (normcase -> pad, grootte), bijgehouden tijdens
+        #: het klikken zodat de samenvatting niet telkens de hele boom afloopt.
+        self._checked: dict[str, tuple[str, int]] = {}
         self._updating_checks = False
 
         self.setWindowTitle(f"{__app_name__} {__version__}")
@@ -458,6 +461,7 @@ class MainWindow(QMainWindow):
         self.thumbnails.clear_pending()
         self.tree.clear()
         self._items_by_path.clear()
+        self._checked.clear()
         self._pixmaps.clear()
         self._no_preview.clear()
         self.result = None
@@ -469,6 +473,7 @@ class MainWindow(QMainWindow):
         self.tree.setUpdatesEnabled(False)
         self.tree.clear()
         self._items_by_path.clear()
+        self._checked.clear()
 
         for index, group in enumerate(result.sorted_groups(), start=1):
             group_item = QTreeWidgetItem(self.tree)
@@ -538,6 +543,17 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ vinkjes
 
+    def _mark_checked(self, item: QTreeWidgetItem, checked: bool) -> None:
+        """Houd de administratie van aangevinkte bestanden bij."""
+        path = str(item.data(0, PATH_ROLE) or "")
+        if not path:
+            return
+        key = os.path.normcase(path)
+        if checked:
+            self._checked[key] = (path, int(item.data(0, SIZE_ROLE) or 0))
+        else:
+            self._checked.pop(key, None)
+
     def _on_item_changed(self, item: QTreeWidgetItem, column: int) -> None:
         if self._updating_checks or column != 0:
             return
@@ -549,52 +565,62 @@ class MainWindow(QMainWindow):
                     child = item.child(i)
                     if not child.isDisabled():
                         child.setCheckState(0, state)
+                        self._mark_checked(child, state == Qt.CheckState.Checked)
             self._updating_checks = False
+        else:
+            self._mark_checked(item, item.checkState(0) == Qt.CheckState.Checked)
         self._update_selection_summary()
 
     def _checked_paths(self) -> list[str]:
-        paths: list[str] = []
-        for i in range(self.tree.topLevelItemCount()):
-            group_item = self.tree.topLevelItem(i)
-            for j in range(group_item.childCount()):
-                child = group_item.child(j)
-                if child.checkState(0) == Qt.CheckState.Checked:
-                    path = child.data(0, PATH_ROLE)
-                    if path:
-                        paths.append(str(path))
-        return paths
+        return [path for path, _size in self._checked.values()]
 
     def _select_all_duplicates(self) -> None:
         """Vink per groep alles aan behalve het oudste bestand."""
         if self.tree.topLevelItemCount() == 0:
             return
         self._updating_checks = True
-        for i in range(self.tree.topLevelItemCount()):
-            group_item = self.tree.topLevelItem(i)
-            for j in range(group_item.childCount()):
-                child = group_item.child(j)
-                if child.isDisabled():
-                    continue
-                child.setCheckState(
-                    0, Qt.CheckState.Unchecked if j == 0 else Qt.CheckState.Checked
+        self.tree.setUpdatesEnabled(False)
+        self.tree.blockSignals(True)
+        try:
+            self._checked.clear()
+            for i in range(self.tree.topLevelItemCount()):
+                group_item = self.tree.topLevelItem(i)
+                for j in range(group_item.childCount()):
+                    child = group_item.child(j)
+                    if child.isDisabled():
+                        continue
+                    checked = j != 0
+                    child.setCheckState(
+                        0, Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+                    )
+                    self._mark_checked(child, checked)
+                group_item.setCheckState(
+                    0,
+                    Qt.CheckState.PartiallyChecked
+                    if group_item.childCount() > 1
+                    else Qt.CheckState.Unchecked,
                 )
-            group_item.setCheckState(
-                0,
-                Qt.CheckState.PartiallyChecked
-                if group_item.childCount() > 1
-                else Qt.CheckState.Unchecked,
-            )
-        self._updating_checks = False
+        finally:
+            self.tree.blockSignals(False)
+            self.tree.setUpdatesEnabled(True)
+            self._updating_checks = False
         self._update_selection_summary()
 
     def _clear_checks(self) -> None:
         self._updating_checks = True
-        for i in range(self.tree.topLevelItemCount()):
-            group_item = self.tree.topLevelItem(i)
-            group_item.setCheckState(0, Qt.CheckState.Unchecked)
-            for j in range(group_item.childCount()):
-                group_item.child(j).setCheckState(0, Qt.CheckState.Unchecked)
-        self._updating_checks = False
+        self.tree.setUpdatesEnabled(False)
+        self.tree.blockSignals(True)
+        try:
+            for i in range(self.tree.topLevelItemCount()):
+                group_item = self.tree.topLevelItem(i)
+                group_item.setCheckState(0, Qt.CheckState.Unchecked)
+                for j in range(group_item.childCount()):
+                    group_item.child(j).setCheckState(0, Qt.CheckState.Unchecked)
+        finally:
+            self.tree.blockSignals(False)
+            self.tree.setUpdatesEnabled(True)
+            self._updating_checks = False
+        self._checked.clear()
         self._update_selection_summary()
 
     def _keep_only(self, item: QTreeWidgetItem) -> None:
@@ -607,23 +633,21 @@ class MainWindow(QMainWindow):
             child = parent.child(i)
             if child.isDisabled():
                 continue
+            checked = child is not item
             child.setCheckState(
-                0, Qt.CheckState.Unchecked if child is item else Qt.CheckState.Checked
+                0, Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
             )
+            self._mark_checked(child, checked)
         self._updating_checks = False
         self._update_selection_summary()
 
     def _update_selection_summary(self) -> None:
-        paths = self._checked_paths()
-        total = 0
-        for path in paths:
-            item = self._items_by_path.get(os.path.normcase(path))
-            if item is not None:
-                total += int(item.data(0, SIZE_ROLE) or 0)
+        total = sum(size for _path, size in self._checked.values())
+        count = len(self._checked)
         self.summary_label.setText(
-            f"{len(paths)} aangevinkt  ({format_bytes(total)})" if paths else ""
+            f"{count} aangevinkt  ({format_bytes(total)})" if count else ""
         )
-        self.delete_button.setEnabled(bool(paths))
+        self.delete_button.setEnabled(bool(count))
 
     # ------------------------------------------------------------------ miniaturen
 
@@ -637,6 +661,8 @@ class MainWindow(QMainWindow):
     def _request_visible_thumbnails(self) -> None:
         if not self.thumbs_check.isChecked():
             return
+        # Wat nog in de wachtrij staat gaat over rijen die inmiddels uit beeld zijn.
+        self.thumbnails.drop_queued()
         viewport = self.tree.viewport()
         height = viewport.height()
         step = max(16, self.tree.sizeHintForRow(0) or 24)
@@ -947,6 +973,7 @@ class MainWindow(QMainWindow):
         if not paths:
             return
         self._updating_checks = True
+        self.tree.blockSignals(True)
         for i in range(self.tree.topLevelItemCount()):
             group_item = self.tree.topLevelItem(i)
             checked = 0
@@ -955,6 +982,7 @@ class MainWindow(QMainWindow):
                 path = os.path.normcase(str(child.data(0, PATH_ROLE) or ""))
                 if path in paths and not child.isDisabled():
                     child.setCheckState(0, Qt.CheckState.Checked)
+                    self._mark_checked(child, True)
                     checked += 1
             if checked == 0:
                 state = Qt.CheckState.Unchecked
@@ -963,6 +991,7 @@ class MainWindow(QMainWindow):
             else:
                 state = Qt.CheckState.PartiallyChecked
             group_item.setCheckState(0, state)
+        self.tree.blockSignals(False)
         self._updating_checks = False
         self._update_selection_summary()
 
@@ -978,6 +1007,7 @@ class MainWindow(QMainWindow):
                 if os.path.normcase(path) in removed:
                     group_item.removeChild(child)
                     self._items_by_path.pop(os.path.normcase(path), None)
+                    self._checked.pop(os.path.normcase(path), None)
             if group_item.childCount() < 2:
                 self.tree.takeTopLevelItem(i)
         self._updating_checks = False
