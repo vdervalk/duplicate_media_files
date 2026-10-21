@@ -251,13 +251,26 @@ def test_threshold_slider_widens_the_selection(window, photo_tree):
     populate_blur(window, photo_tree)
     tab = window.blur_tab
 
+    # De lijst wordt met een korte vertraging bijgewerkt; in de test duwen we hem door.
     tab.threshold_slider.setValue(0)
+    tab._apply_visibility()
     strict = len(visible_names(tab))
+
     tab.threshold_slider.setValue(100)
+    tab._apply_visibility()
     loose = len(visible_names(tab))
 
     assert loose > strict
-    assert "scherp.jpg" not in visible_names(tab) or loose >= strict
+
+
+def test_threshold_label_follows_the_slider_immediately(window, photo_tree):
+    """Het getal naast de regelaar mag niet op de vertraging wachten."""
+    populate_blur(window, photo_tree)
+    tab = window.blur_tab
+
+    tab.threshold_slider.setValue(100)
+    assert tab.threshold_label.text() == f"{tab.threshold:.0f}"
+    assert tab._filter_timer.isActive()
 
 
 def test_checking_visible_photos_and_delete_signal(window, photo_tree):
@@ -324,3 +337,86 @@ def test_f5_refreshes_the_active_tab(window, media_tree, photo_tree):
     window._refresh_active_tab()
 
     assert "vaag.jpg" not in [e.name for e in window.blur_tab.result.entries]
+
+
+# --------------------------------------------------------------------------
+# Administratie van vinkjes (bijgehouden in plaats van telkens geteld)
+# --------------------------------------------------------------------------
+
+
+def test_duplicate_checks_are_tracked_per_click(window, media_tree):
+    populate(window, media_tree)
+    group_item = window.tree.topLevelItem(0)
+    child = group_item.child(1)
+
+    child.setCheckState(0, Qt.CheckState.Checked)
+    assert window._checked_paths() == [child.data(0, Qt.ItemDataRole.UserRole)]
+    assert "1 aangevinkt" in window.summary_label.text()
+
+    child.setCheckState(0, Qt.CheckState.Unchecked)
+    assert window._checked_paths() == []
+    assert window.summary_label.text() == ""
+
+
+def test_group_checkbox_updates_the_tally(window, media_tree):
+    populate(window, media_tree)
+    group_item = window.tree.topLevelItem(0)
+
+    group_item.setCheckState(0, Qt.CheckState.Checked)
+    assert len(window._checked_paths()) == group_item.childCount()
+
+    group_item.setCheckState(0, Qt.CheckState.Unchecked)
+    assert window._checked_paths() == []
+
+
+def test_select_all_duplicates_matches_the_tally(window, media_tree):
+    result = populate(window, media_tree)
+    window._select_all_duplicates()
+
+    assert len(window._checked_paths()) == result.duplicate_files
+    assert set(window._checked_paths()) == {
+        f.path for group in result.groups for f in group.files[1:]
+    }
+
+
+def test_deleting_clears_those_files_from_the_tally(window, media_tree):
+    populate(window, media_tree)
+    window._select_all_duplicates()
+    victim = window._checked_paths()[0]
+
+    window._remove_paths_from_view([victim])
+
+    assert victim not in window._checked_paths()
+    assert str(len(window._checked_paths())) in window.summary_label.text()
+
+
+def test_refresh_keeps_the_tally_in_step(window, media_tree):
+    import os
+
+    populate(window, media_tree)
+    window._select_all_duplicates()
+    gone = window._checked_paths()[0]
+    os.remove(gone)
+
+    window._refresh_list()
+
+    assert gone not in window._checked_paths()
+    assert len(window._checked_paths()) == len(
+        [p for p in window._checked_paths() if os.path.exists(p)]
+    )
+
+
+def test_blur_checks_survive_removing_one_photo(window, photo_tree):
+    populate_blur(window, photo_tree)
+    tab = window.blur_tab
+    tab.only_blurry_check.setChecked(False)
+    tab.low_detail_check.setChecked(True)
+    tab._apply_visibility()
+    tab._check_visible()
+    before = set(tab.checked_paths())
+    victim = next(iter(before))
+
+    tab.remove_paths([victim])
+
+    assert set(tab.checked_paths()) == before - {victim}
+    assert str(len(tab.checked_paths())) in tab.summary_label.text()

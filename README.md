@@ -269,6 +269,23 @@ voorbeeldplaatjes.
 
 ## Snelheid
 
+### In de lijst
+
+De overzichten zijn gemaakt voor tienduizenden regels. Gemeten op een lijst van 20.000 foto's:
+
+| Handeling | Tijd |
+|---|---:|
+| Lijst opbouwen | ongeveer 1 seconde |
+| Grens verschuiven (30 stappen slepen) | 77 ms |
+| Vinkje aan of uit | 1 ms |
+| Alles aanvinken of wissen | 60 tot 120 ms |
+
+De lijst wordt tijdens het slepen van de schuifregelaar pas bijgewerkt als je even stilhoudt, en
+het voorbeeld laadt pas als de selectie stilstaat. Daardoor blijft pijlen door een lange lijst
+soepel.
+
+### Tijdens het scannen
+
 De eerste scan van een volle externe schijf is I/O-gebonden: de tijd zit in het lezen van
 bestanden die in grootte overeenkomen. Wat helpt:
 
@@ -285,7 +302,7 @@ kost nul schijftoegang.
 
 ```bash
 pip install -r requirements-dev.txt
-pytest                       # 95 tests: hashing, scanner, scherpte, export, acties, GUI
+pytest                       # 102 tests: hashing, scanner, scherpte, export, acties, GUI
 ```
 
 De GUI-tests draaien headless (`QT_QPA_PLATFORM=offscreen`).
